@@ -1,6 +1,6 @@
 const int PIN_LED = 7;
-unsigned int g_period = 1000;
-unsigned int g_duty   = 0;
+unsigned int g_period = 1000;   // PWM 주기 (unit: us)
+unsigned int g_duty   = 0;      // duty (unit: %)
 
 void set_period(int period) {
   if (period < 100)   period = 100;
@@ -29,23 +29,16 @@ void pwm_once() {
   }
 }
 
-void pwm_hold(unsigned int us_total) {
-  unsigned int cycles = us_total / g_period;
-  if (cycles == 0) cycles = 1;
-  for (unsigned int i = 0; i < cycles; i++) pwm_once();
-}
-
 void setup() {
   pinMode(PIN_LED, OUTPUT);
-  set_period(10000);
+  set_period(10000);   // 10000 -> 1000 -> 100 으로 바꿔가며 녹화
 }
+
 void loop() {
-  for (int d = 0; d <= 100; d++) {   // 밝아지기
-    set_duty(d);
-    pwm_hold(5000);
-  }
-  for (int d = 99; d >= 1; d--) {    // 어두워지기
-    set_duty(d);
-    pwm_hold(5000);
+  unsigned long t0 = micros(), elapsed;
+  while ((elapsed = micros() - t0) < 1000000UL) {
+    int step = elapsed / 5000;                  // 0 ~ 199
+    set_duty(step <= 100 ? step : 200 - step);  // 0->100 (101단계), 99->1
+    pwm_once();
   }
 }
