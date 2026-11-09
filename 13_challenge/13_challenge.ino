@@ -1,79 +1,108 @@
-#include <Servo.h>
-
 // Arduino pin assignment
-#define PIN_SERVO 10
+#define PIN_IR A0
 
-// servo calibration
-#define _DUTY_MIN 530   // servo full clock-wise position (0 degree)
-#define _DUTY_NEU 1500  // servo neutral position
-#define _DUTY_MAX 2300  // servo full counter-clockwise position (180 degree)
-
-// 실험 선택: 1 -> 3 deg/s로 180도 (60초), 2 -> 0.3 deg/s로 90도 (300초)
-#define _EXPERIMENT 1
-
-#if _EXPERIMENT == 1
-  #define _SERVO_SPEED 3.0    // servo angular speed (unit: degree/sec)
-  #define _MOVE_ANGLE  180.0  // total movement (unit: degree)
-#else
-  #define _SERVO_SPEED 0.3
-  #define _MOVE_ANGLE  90.0
-#endif
-
-#define INTERVAL 20           // servo update interval (unit: msec)
+// configurable parameters
+#define LOOP_INTERVAL 50    // Loop Interval (unit: msec)
+#define _EMA_ALPHA    0.7   // 이 코드의 EMA 식에서는 이전 값의 가중치 (클수록 부드러움)
+#define FLT_N         10    // 필터 측정 횟수
+#define FLT_POSITION  0.5   // 0.5 = 중앙값
 
 // global variables
-unsigned long last_sampling_time;   // unit: msec
-unsigned long step = 0;             // 갱신 횟수
+unsigned long last_sampling_time; // unit: msec
+int ema;                          // Voltage values from the IR sensor (0 ~ 1023)
 
-Servo myservo;
+void setup()
+{
+  Serial.begin(1000000);    // 1,000,000 bps
 
-float duty_change_per_interval;     // duty change per interval (unit: usec, 1보다 작을 수 있음)
-float duty_target;                  // target duty
-float duty_curr;                    // current duty
-
-void setup() {
-  // 보정값을 attach에 넘겨야 530이 기본 최솟값(544)으로 잘리지 않음
-  myservo.attach(PIN_SERVO, _DUTY_MIN, _DUTY_MAX);
-
-  // 시작 위치(0도)로 이동 후 대기
-  duty_curr = _DUTY_MIN;
-  myservo.writeMicroseconds(_DUTY_MIN);
-
-  Serial.begin(115200);
-
-  // 각속도를 한 주기의 duty 변화량으로 환산 (float 계산)
-  duty_change_per_interval =
-    (float)(_DUTY_MAX - _DUTY_MIN) * (_SERVO_SPEED / 180.0) * (INTERVAL / 1000.0);
-
-  // 목표 duty: 0도에서 _MOVE_ANGLE만큼 이동한 위치
-  duty_target = _DUTY_MIN + (float)(_DUTY_MAX - _DUTY_MIN) * (_MOVE_ANGLE / 180.0);
-
-  delay(1500);
-
-  // 대기 시간 동안 밀린 주기를 한꺼번에 처리하지 않도록 초기화
-  last_sampling_time = millis();
+  last_sampling_time = 0;
 }
 
-void loop() {
-  // wait until next sampling time.
-  if (millis() < (last_sampling_time + INTERVAL))
-    return;
-  last_sampling_time += INTERVAL;
+void loop()
+{
+  unsigned int raw, filtered;           // Voltage values from the IR sensor (0 ~ 1023)
 
-  // duty_curr를 duty_target 쪽으로 이동 (누적 합 대신 step x 변화량으로 계산해 오차가 쌓이지 않게 함)
-  if (duty_curr < duty_target) {
-    step++;
-    duty_curr = _DUTY_MIN + step * duty_change_per_interval;
-    if (duty_curr > duty_target)
-      duty_curr = duty_target;
+  // wait until next sampling time.
+  if (millis() < (last_sampling_time + LOOP_INTERVAL))
+    return;
+  last_sampling_time += LOOP_INTERVAL;
+
+  // Take a median value from multiple measurements (verbose 0: 플로터에 글자가 섞이지 않게)
+  filtered = ir_sensor_filtered(FLT_N, FLT_POSITION, 0);
+
+  // Take a single measurement
+  raw = analogRead(PIN_IR);
+
+  // Calculate EMA
+  ema = _EMA_ALPHA * ema + (1.0 - _EMA_ALPHA) * raw;
+
+  // Output the raw, filtered, and EMA values (EMA는 +100, FLT는 +200으로 띄워서 겹치지 않게)
+  Serial.print("MIN:"); Serial.print(0);              Serial.print(",");
+  Serial.print("RAW:"); Serial.print(raw);            Serial.print(",");
+  Serial.print("EMA:"); Serial.print(ema + 100);      Serial.print(",");
+  Serial.print("FLT:"); Serial.print(filtered + 200); Serial.print(",");
+  Serial.print("MAX:"); Serial.println(900);
+}
+
+int compare(const void *a, const void *b) {
+  return (*(unsigned int *)a - *(unsigned int *)b);
+}
+
+unsigned int ir_sensor_filtered(unsigned int n, float position, int verbose)
+{
+  // n회 측정 후 정렬하고 n * position 번째 값을 반환 (오류 시 0)
+  unsigned int *ir_val, ret_val;
+  unsigned int start_time;
+
+  if (verbose >= 2)
+    start_time = millis();
+
+  if ((n == 0) || (n > 1000) || (position < 0.0) || (position > 1))
+    return 0;
+
+  if (position == 1.0)
+    position = 0.999;
+
+  if (verbose == 1) {
+    Serial.print("n: "); Serial.print(n);
+    Serial.print(", position: "); Serial.print(position);
+    Serial.print(", ret_idx: ");  Serial.println((unsigned int)(n * position));
   }
 
-  // update servo position (정수 usec만 받으므로 반올림)
-  myservo.writeMicroseconds((int)(duty_curr + 0.5));
+  ir_val = (unsigned int *)malloc(sizeof(unsigned int) * n);
+  if (ir_val == NULL)
+    return 0;
 
-  // output to the serial port (serial plotter format)
-  Serial.print("Min:");          Serial.print(_DUTY_MIN);
-  Serial.print(",duty_target:"); Serial.print(duty_target);
-  Serial.print(",duty_curr:");   Serial.print(duty_curr);
-  Serial.print(",Max:");         Serial.println(_DUTY_MAX);
+  if (verbose == 1)
+    Serial.print("IR:");
+
+  for (int i = 0; i < n; i++) {
+    ir_val[i] = analogRead(PIN_IR);
+    if (verbose == 1) {
+      Serial.print(" ");
+      Serial.print(ir_val[i]);
+    }
+  }
+
+  if (verbose == 1)
+    Serial.print("  => ");
+
+  qsort(ir_val, n, sizeof(unsigned int), compare);
+  ret_val = ir_val[(unsigned int)(n * position)];
+
+  if (verbose == 1) {
+    for (int i = 0; i < n; i++) {
+      Serial.print(" ");
+      Serial.print(ir_val[i]);
+    }
+    Serial.print(" :: ");
+    Serial.println(ret_val);
+  }
+  free(ir_val);
+
+  if (verbose >= 2) {
+    Serial.print("Elapsed time: "); Serial.print(millis() - start_time); Serial.println("ms");
+  }
+
+  return ret_val;
 }
